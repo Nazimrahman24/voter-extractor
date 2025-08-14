@@ -1,6 +1,7 @@
 import os
-import re
 import io
+import re
+import gc
 import cv2
 import numpy as np
 import pandas as pd
@@ -11,18 +12,22 @@ from google.cloud import vision
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
+# Read Google Vision JSON path from environment variable
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+
 def ocr_cell_google(cell_img):
+    """Perform OCR on a single cell image using Google Vision."""
     client = vision.ImageAnnotatorClient()
     img_byte_arr = io.BytesIO()
     Image.fromarray(cv2.cvtColor(cell_img, cv2.COLOR_BGR2RGB)).save(img_byte_arr, format='PNG')
-    content = img_byte_arr.getvalue()
-    image = vision.Image(content=content)
+    image = vision.Image(content=img_byte_arr.getvalue())
     response = client.document_text_detection(image=image)
     if response.error.message:
         raise Exception(f"OCR Error: {response.error.message}")
     return response.full_text_annotation.text
 
 def extract_from_cell_text(text):
+    """Extract voter details from OCR text."""
     voter_id_match = re.search(r"[A-Z]{3}\s*\d{7}", text)
     voter_id = voter_id_match.group(0).replace(" ", "") if voter_id_match else ""
     name_match = re.search(r"निर्वाचक का नाम[:\s]*([^\n]+)", text)
@@ -38,8 +43,10 @@ def extract_from_cell_text(text):
     return [voter_id, name, relative, house, age, gender]
 
 def process_pdf_with_google(pdf_path, save_path):
+    """Process PDF page by page and extract voter data to Excel."""
     all_voters = []
-    pages = convert_from_path(pdf_path, dpi=300)
+
+    pages = convert_from_path(pdf_path, dpi=200)  # lower DPI to save memory
 
     for page_img in pages:
         img = cv2.cvtColor(np.array(page_img), cv2.COLOR_RGB2BGR)
@@ -57,16 +64,26 @@ def process_pdf_with_google(pdf_path, save_path):
 
         unique_boxes = []
         for b in sorted(boxes, key=lambda b: (b[1], b[0])):
-            if not any(abs(b[0] - ub[0]) < 15 and abs(b[1] - ub[1]) < 15 for ub in unique_boxes):
+            if not any(abs(b[0]-ub[0])<15 and abs(b[1]-ub[1])<15 for ub in unique_boxes):
                 unique_boxes.append(b)
 
         for (x, y, w, h) in unique_boxes:
             cell_img = img[y:y+h, x:x+w]
-            cell_text = ocr_cell_google(cell_img)
-            voter_data = extract_from_cell_text(cell_text)
-            if any(voter_data):
-                all_voters.append(voter_data)
+            try:
+                cell_text = ocr_cell_google(cell_img)
+                voter_data = extract_from_cell_text(cell_text)
+                if any(voter_data):
+                    all_voters.append(voter_data)
+            except Exception as e:
+                print("OCR failed for a cell:", e)
+            finally:
+                del cell_img, cell_text, voter_data
+                gc.collect()
 
+        del img, gray, thresh, detect_h, detect_v, grid, contours, boxes, unique_boxes
+        gc.collect()
+
+    # Save Excel
     df = pd.DataFrame(all_voters, columns=["VoterID", "VoterName", "RelativeName", "HouseNumber", "Age", "Gender"])
     with pd.ExcelWriter(save_path, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Voters")
@@ -78,6 +95,7 @@ def process_pdf_with_google(pdf_path, save_path):
         ws.set_column("E:E", 5)
         ws.set_column("F:F", 10)
 
+# Render-friendly routes
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -96,17 +114,10 @@ def upload_file():
         process_pdf_with_google(pdf_path, output_path)
         return send_file(output_path, as_attachment=True)
     except Exception as e:
-        print("Error:", str(e))  # see console
+        print("Error:", str(e))
         return {"error": str(e)}, 500
 
-import os
-
-# Read Google Vision JSON path from environment variable
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-
-# Use Render's port, default to 5000 for local testing
-port = int(os.environ.get("PORT", 5000))
-
-# Start the Flask app
-app.run(host="0.0.0.0", port=port, debug=True)
-
+# Start Flask app with Render port
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
