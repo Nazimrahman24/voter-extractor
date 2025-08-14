@@ -99,6 +99,14 @@ def upload_file():
         print("Error:", str(e))  # see console
         return {"error": str(e)}, 500
 
-if __name__ == "__main__":
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "C:/Users/nazim/Downloads/myvisionkey.json"
-    app.run(debug=True)
+import os
+
+# Read Google Vision JSON path from environment variable
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+
+# Use Render's port, default to 5000 for local testing
+port = int(os.environ.get("PORT", 5000))
+
+# Start the Flask app
+app.run(host="0.0.0.0", port=port, debug=True)
+
