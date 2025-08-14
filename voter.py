@@ -5,19 +5,19 @@ import gc
 import cv2
 import numpy as np
 import pandas as pd
-from pdf2image import convert_from_path
+from pdf2image import pdfinfo_from_path, convert_from_path
 from PIL import Image
 from flask import Flask, request, render_template, send_file
 from google.cloud import vision
 
+# Flask app
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
-# Read Google Vision JSON path from environment variable
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+# Google Vision client
+client = vision.ImageAnnotatorClient()
 
+# OCR for one cell
 def ocr_cell_google(cell_img):
-    """Perform OCR on a single cell image using Google Vision."""
-    client = vision.ImageAnnotatorClient()
     img_byte_arr = io.BytesIO()
     Image.fromarray(cv2.cvtColor(cell_img, cv2.COLOR_BGR2RGB)).save(img_byte_arr, format='PNG')
     image = vision.Image(content=img_byte_arr.getvalue())
@@ -26,8 +26,8 @@ def ocr_cell_google(cell_img):
         raise Exception(f"OCR Error: {response.error.message}")
     return response.full_text_annotation.text
 
+# Extract data from OCR text
 def extract_from_cell_text(text):
-    """Extract voter details from OCR text."""
     voter_id_match = re.search(r"[A-Z]{3}\s*\d{7}", text)
     voter_id = voter_id_match.group(0).replace(" ", "") if voter_id_match else ""
     name_match = re.search(r"निर्वाचक का नाम[:\s]*([^\n]+)", text)
@@ -42,13 +42,16 @@ def extract_from_cell_text(text):
     gender = gender_match.group(1).strip() if gender_match else ""
     return [voter_id, name, relative, house, age, gender]
 
+# Process PDF one page at a time
 def process_pdf_with_google(pdf_path, save_path):
-    """Process PDF page by page and extract voter data to Excel."""
     all_voters = []
+    info = pdfinfo_from_path(pdf_path)
+    total_pages = info['Pages']
 
-    pages = convert_from_path(pdf_path, dpi=200)  # lower DPI to save memory
-
-    for page_img in pages:
+    for page_number in range(1, total_pages + 1):
+        # Convert one page to image
+        pages = convert_from_path(pdf_path, dpi=190, first_page=page_number, last_page=page_number)
+        page_img = pages[0]
         img = cv2.cvtColor(np.array(page_img), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
@@ -64,26 +67,24 @@ def process_pdf_with_google(pdf_path, save_path):
 
         unique_boxes = []
         for b in sorted(boxes, key=lambda b: (b[1], b[0])):
-            if not any(abs(b[0]-ub[0])<15 and abs(b[1]-ub[1])<15 for ub in unique_boxes):
+            if not any(abs(b[0] - ub[0]) < 15 and abs(b[1] - ub[1]) < 15 for ub in unique_boxes):
                 unique_boxes.append(b)
 
         for (x, y, w, h) in unique_boxes:
             cell_img = img[y:y+h, x:x+w]
-            try:
-                cell_text = ocr_cell_google(cell_img)
-                voter_data = extract_from_cell_text(cell_text)
-                if any(voter_data):
-                    all_voters.append(voter_data)
-            except Exception as e:
-                print("OCR failed for a cell:", e)
-            finally:
-                del cell_img, cell_text, voter_data
-                gc.collect()
+            cell_text = ocr_cell_google(cell_img)
+            voter_data = extract_from_cell_text(cell_text)
+            if any(voter_data):
+                all_voters.append(voter_data)
+            # Free memory per cell
+            del cell_img, cell_text, voter_data
+            gc.collect()
 
-        del img, gray, thresh, detect_h, detect_v, grid, contours, boxes, unique_boxes
+        # Free memory per page
+        del img, gray, thresh, detect_h, detect_v, grid, contours, boxes, unique_boxes, page_img, pages
         gc.collect()
 
-    # Save Excel
+    # Save Excel at the end
     df = pd.DataFrame(all_voters, columns=["VoterID", "VoterName", "RelativeName", "HouseNumber", "Age", "Gender"])
     with pd.ExcelWriter(save_path, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Voters")
@@ -95,7 +96,7 @@ def process_pdf_with_google(pdf_path, save_path):
         ws.set_column("E:E", 5)
         ws.set_column("F:F", 10)
 
-# Render-friendly routes
+# Routes
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -104,7 +105,6 @@ def home():
 def upload_file():
     if "pdf_file" not in request.files:
         return "No file uploaded", 400
-
     pdf_file = request.files["pdf_file"]
     pdf_path = "uploaded.pdf"
     pdf_file.save(pdf_path)
@@ -117,7 +117,9 @@ def upload_file():
         print("Error:", str(e))
         return {"error": str(e)}, 500
 
-# Start Flask app with Render port
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+# Google Vision credentials
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+
+# Render port
+port = int(os.environ.get("PORT", 5000))
+app.run(host="0.0.0.0", port=port, debug=True)
