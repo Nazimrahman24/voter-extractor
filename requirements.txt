@@ -1,0 +1,8 @@
+Flask
+pdf2image
+pandas
+opencv-python
+Pillow
+google-cloud-vision
+numpy
+xlsxwriter

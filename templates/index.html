@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Hindi Voter List Extractor</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+
+        <!-- Header with AICVC logo / trademark -->
+        <div class="header">
+            <img src="{{ url_for('static', filename='aicvc_logo.png') }}" alt="AICVC Logo">
+            <h1>AICVC - Hindi Voter List Extractor™</h1>
+        </div>
+
+        <!-- Usage Instructions -->
+        <div class="instructions">
+            <p><strong>Usage Instructions:</strong></p>
+            <ul>
+                <li>Upload only <strong>Hindi voter list PDF</strong> files.</li>
+                <li>File size must be less than <strong>50MB</strong>.</li>
+                <li>Clear quality PDF files provide better results.</li>
+                <li>Extracted data will be downloaded in <strong>Excel (.xlsx)</strong> format.</li>
+            </ul>
+        </div>
+
+        <div id="uploadArea" class="upload-area">
+            <p>Click or Drag & Drop PDF here</p>
+            <input type="file" id="fileInput" accept=".pdf" hidden>
+        </div>
+
+        <div id="fileInfo">
+            <span>File Name: <span id="fileName"></span></span>
+            <span>Size: <span id="fileSize"></span></span>
+        </div>
+
+        <div id="statusMessage"></div>
+
+        <button id="convertBtn" disabled>Convert to Excel</button>
+
+        <div id="resultsSection">
+            <a id="downloadBtn" href="#">Download Excel</a>
+        </div>
+
+        <div id="errorSection">
+            <span id="errorMessage"></span>
+        </div>
+
+        <div class="footer">
+            &copy; 2025 AICVC™. All rights reserved.
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
