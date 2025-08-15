@@ -2,6 +2,8 @@ import os
 import io
 import re
 import gc
+import json
+import tempfile
 import cv2
 import numpy as np
 import pandas as pd
@@ -10,13 +12,31 @@ from PIL import Image
 from flask import Flask, request, render_template, send_file
 from google.cloud import vision
 
-# Flask app
+# -----------------------
+# Load Google Vision Credentials from ENV
+# -----------------------
+google_creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+if not google_creds_json:
+    raise RuntimeError("Missing GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable.")
+
+# Create a temp credentials file for Google Vision API
+with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as temp_cred_file:
+    temp_cred_file.write(google_creds_json.encode())
+    temp_cred_path = temp_cred_file.name
+
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_cred_path
+
+# -----------------------
+# Flask app setup
+# -----------------------
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
-# Google Vision client
+# Google Vision Client
 client = vision.ImageAnnotatorClient()
 
+# -----------------------
 # OCR for one cell
+# -----------------------
 def ocr_cell_google(cell_img):
     img_byte_arr = io.BytesIO()
     Image.fromarray(cv2.cvtColor(cell_img, cv2.COLOR_BGR2RGB)).save(img_byte_arr, format='PNG')
@@ -26,7 +46,9 @@ def ocr_cell_google(cell_img):
         raise Exception(f"OCR Error: {response.error.message}")
     return response.full_text_annotation.text
 
-# Extract data from OCR text
+# -----------------------
+# Extract structured data from text
+# -----------------------
 def extract_from_cell_text(text):
     voter_id_match = re.search(r"[A-Z]{3}\s*\d{7}", text)
     voter_id = voter_id_match.group(0).replace(" ", "") if voter_id_match else ""
@@ -42,14 +64,15 @@ def extract_from_cell_text(text):
     gender = gender_match.group(1).strip() if gender_match else ""
     return [voter_id, name, relative, house, age, gender]
 
-# Process PDF one page at a time
+# -----------------------
+# Process PDF with Google Vision
+# -----------------------
 def process_pdf_with_google(pdf_path, save_path):
     all_voters = []
     info = pdfinfo_from_path(pdf_path)
     total_pages = info['Pages']
 
     for page_number in range(1, total_pages + 1):
-        # Convert one page to image
         pages = convert_from_path(pdf_path, dpi=190, first_page=page_number, last_page=page_number)
         page_img = pages[0]
         img = cv2.cvtColor(np.array(page_img), cv2.COLOR_RGB2BGR)
@@ -76,15 +99,12 @@ def process_pdf_with_google(pdf_path, save_path):
             voter_data = extract_from_cell_text(cell_text)
             if any(voter_data):
                 all_voters.append(voter_data)
-            # Free memory per cell
             del cell_img, cell_text, voter_data
             gc.collect()
 
-        # Free memory per page
         del img, gray, thresh, detect_h, detect_v, grid, contours, boxes, unique_boxes, page_img, pages
         gc.collect()
 
-    # Save Excel at the end
     df = pd.DataFrame(all_voters, columns=["VoterID", "VoterName", "RelativeName", "HouseNumber", "Age", "Gender"])
     with pd.ExcelWriter(save_path, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Voters")
@@ -96,7 +116,9 @@ def process_pdf_with_google(pdf_path, save_path):
         ws.set_column("E:E", 5)
         ws.set_column("F:F", 10)
 
+# -----------------------
 # Routes
+# -----------------------
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -105,21 +127,25 @@ def home():
 def upload_file():
     if "pdf_file" not in request.files:
         return "No file uploaded", 400
-    pdf_file = request.files["pdf_file"]
-    pdf_path = "uploaded.pdf"
-    pdf_file.save(pdf_path)
 
-    output_path = "output.xlsx"
+    pdf_file = request.files["pdf_file"]
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+        pdf_file.save(temp_pdf.name)
+        pdf_path = temp_pdf.name
+
+    output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx").name
+
     try:
         process_pdf_with_google(pdf_path, output_path)
-        return send_file(output_path, as_attachment=True)
+        return send_file(output_path, as_attachment=True, download_name="output.xlsx")
     except Exception as e:
         print("Error:", str(e))
         return {"error": str(e)}, 500
 
-# Google Vision credentials
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-
-# Render port
-port = int(os.environ.get("PORT", 5000))
-app.run(host="0.0.0.0", port=port, debug=True)
+# -----------------------
+# Run app (Railway sets PORT)
+# -----------------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
